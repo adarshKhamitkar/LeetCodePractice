@@ -42,7 +42,7 @@ def remove_genre(genre):
         print("Genre "+genre+" removed from the list of genres\n")
     else: print("Genre "+genre+" not found!\n")
 
-statement = "Among all the movies across all the genres, marvel genre has been the best and most watched genre of all time."
+statement = "Harry Potter and the Philosopher's Stone, Harry Potter and the Chamber of Secrets, Harry Potter and the Prisoner of Azkaban, Harry Potter and the Goblet of Fire, Harry Potter and the Order of the Phoenix, Harry Potter and the Half-Blood Prince, Harry Potter and the Deathly Hallows: Part 1, Harry Potter and the Deathly Hallows: Part 2"
 
 def main():
     get_genre_list()
@@ -52,8 +52,9 @@ if __name__ == "__main__":
     #main()
     word_counts = dict()
     for word in statement.split():
-        if word in word_counts:
-            word_counts[word] = word_counts.get(word) + 1
-        else:
-            word_counts[word] = 1
+        word_counts[word] = word_counts.get(word,0) + 1
+        # if word in word_counts:
+        #     word_counts[word] = word_counts.get(word) + 1
+        # else:
+        #     word_counts[word] = 1
     print(word_counts)
