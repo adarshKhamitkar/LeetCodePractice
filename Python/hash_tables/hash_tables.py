@@ -59,11 +59,11 @@ def hash_function(key):
 
 def hash_table(dictionary):
     hash_table = dict()
-    for i in range(0,11):
+    for i in range(0,6):
         hash_table[i] = []
 
     for key in dictionary.keys():
-        hash_key = hash_function(key) % 10
+        hash_key = hash_function(key) % 5
         hash_table[hash_key].append(key)
 
     return hash_table
