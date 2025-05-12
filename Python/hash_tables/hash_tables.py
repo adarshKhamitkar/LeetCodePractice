@@ -76,3 +76,8 @@ def main():
 if __name__ == "__main__":
     main()
     print("Hash table: ",hash_table(movies))
+
+    word_counter = dict()
+    for word in statement.split():
+        word_counter[word] = word_counter.get(word,0) + 1
+    print("Word counter: ",word_counter)
