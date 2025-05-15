@@ -1,3 +1,4 @@
+# https://leetcode.com/problems/design-linked-list/editorial/
 class DLLNode:
     def __init__(self, data: int):
         self.val = data

@@ -68,5 +68,5 @@ if __name__ == "__main__":
     head2 = ListNode(1)
     head2.next = ListNode(2)
     head2.next.next = head2 
-    print(sol.hasCycle(head2))  # Output: False
+    print(sol.hasCycle(head2))  # Output: True
 
