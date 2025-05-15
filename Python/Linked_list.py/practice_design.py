@@ -1,3 +1,59 @@
+class Node:
+    def __init__(self, data: int):
+        self.val = data
+        self.next = None
+
+
+class SinglyLinkedList:
+    def __init__(self):
+        self.size = 0
+        self.head = Node(0)
+
+    def get(self, index: int) -> int:
+        if index < 0 or index >= self.size: return -1
+
+        curr = self.head
+
+        for _ in range(index + 1):  # index can also be the last node of the list and range(n=5) iterates from 1 to 4, hence the upper limit is index+1
+            curr = curr.next
+
+        return curr.val
+
+    def addAtIndex(self, index: int, data: int) -> None:
+        if index > self.size: return
+
+        if index < 0:
+            index = 0
+
+        new_node = Node(data)
+        self.size += 1
+
+        pred = self.head
+
+        for _ in range(index):  # index should be the same since we are iterating through the list and new node to be added can be the last node also
+            pred = pred.next
+
+        new_node.next = pred.next
+        pred.next = new_node
+
+    def delAtIndex(self, index: int) -> None:
+        if index < 0 or index >= self.size: return
+
+        self.size -= 1
+        pred = self.head
+
+        for _ in range(index):
+            pred = pred.next
+
+        pred.next = pred.next.next  # the node at the given index has to be removed, hence the for loop only goes to the node just before the index and the next node of pred.next will be current pred.next
+
+    def addAtHead(self, data: int) -> None:
+        self.addAtIndex(0, data)
+
+    def addAtEnd(self, data: int) -> None:
+        self.addAtIndex(self.size, data)
+
+################################################################################################################################################################################################################################################
 class DLLNode:
     def __init__(self, data: int):
         self.val = data
@@ -96,7 +152,17 @@ class DoublyLinkedList:
         pred.next = succ
         succ.prev = pred
 
+
 if __name__ == "__main__":
+
+    obj = SinglyLinkedList()
+    print(obj.addAtHead(1))
+    print(obj.addAtEnd(3))
+    print(obj.addAtIndex(1, 2))
+    print(obj.get(1))
+    print(obj.delAtIndex(1))
+    print(obj.get(1))
+
     obj2 = DoublyLinkedList()
     print(obj2.addAtHead(1))
     print(obj2.addAtTail(3))
