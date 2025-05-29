@@ -41,6 +41,7 @@ class ListNode:
         self.next = None
 
 class Solution:
+    #using Fast and slow pointers
     def hasCycle(self, head: ListNode) -> bool:
         if head == None:
             return False
@@ -52,6 +53,19 @@ class Solution:
             slow = slow.next
             fast = fast.next.next
         return True
+
+    #using a set to track visited nodes
+    def hasCycleSet(self, head: ListNode) -> bool:
+        visited = set()
+        current = head
+
+        while current:
+            if current in visited:
+                return True
+            visited.add(current)
+            current = current.next
+
+        return False
         
 if __name__ == "__main__":
     # Example usage
