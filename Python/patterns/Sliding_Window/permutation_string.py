@@ -21,6 +21,9 @@ Constraints:
 1 <= s1.length, s2.length <= 104
 s1 and s2 consist of lowercase English letters.
 """
+
+from collections import Counter
+
 class Solution:
     def checkInclusion(self, s1: str, s2: str) -> bool:
         size_s1 = len(s1)
