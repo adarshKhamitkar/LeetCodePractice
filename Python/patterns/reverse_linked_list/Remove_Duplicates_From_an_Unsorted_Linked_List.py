@@ -40,7 +40,7 @@ class Solution:
 
         res_list = ListNode(0)
         curr = res_list
-        for i in sorted(res):
+        for i in (res):
             new_node = ListNode(i)
             curr.next = new_node
             curr = new_node

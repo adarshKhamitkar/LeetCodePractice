@@ -16,7 +16,10 @@ Input: list1 = [], list2 = [0]
 Output: [0]
 
 """
-
+"""
+Time Complexity: O(n + m)
+Space Complexity: O(1)
+"""
 
 # Definition for singly-linked list.
 class ListNode:
