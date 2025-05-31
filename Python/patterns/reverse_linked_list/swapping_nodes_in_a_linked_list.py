@@ -12,6 +12,8 @@ Input: head = [7,9,6,6,7,8,3,0,9,5], k = 5
 Output: [7,9,6,6,8,7,3,0,9,5]
 """
 # Definition for singly-linked list.
+# This code needs to be implemented in Time O(n) and Space O(1).
+# As of now it is implemented in Time O(n) and Space O(n).
 class ListNode:
     def __init__(self, val=0, next=None):
         self.val = val
