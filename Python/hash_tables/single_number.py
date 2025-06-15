@@ -25,3 +25,9 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# Time Complexity: O(n)
+# Space Complexity: O(n)
+# Note: The solution uses a dictionary to count occurrences of each number.
+# The first loop counts the occurrences, and the second loop finds the number that appears only once.
+# This is efficient for the problem at hand, as it ensures that we only traverse the list a couple of times.
