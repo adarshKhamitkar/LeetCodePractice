@@ -15,7 +15,7 @@ Input: root = []
 Output: []
 """
 
-from typing import List
+from typing import List, Optional
 
 class TreeNode:
     def __init__(self, val=0):
@@ -61,3 +61,52 @@ if __name__ == "__main__":
     #Thus, the overall space complexity is O(n).
     #The time complexity is O(n) because we visit each node exactly once.
     #The space complexity is O(n) because we store the values of all nodes in the levels list.
+
+"""
+Given the root of a binary tree, return the bottom-up level order traversal of its nodes' values. (i.e., from left to right, level by level from leaf to root).
+
+Example 1:
+Input: root = [3,9,20,null,null,15,7]
+Output: [[15,7],[9,20],[3]]
+
+Example 2:
+Input: root = [1]
+Output: [[1]]
+
+Example 3:
+Input: root = []
+Output: []
+"""
+
+class Solution:
+    def levelOrderBottom(self, root: Optional[TreeNode]) -> List[List[int]]:
+        if root == None: return []
+        levels = []
+
+        def bottom_up_levels(levels):
+
+            if len(levels) == 0: return []
+            L, R = 0, len(levels)-1
+            while(L<=R):
+                levels[L], levels[R] = levels[R], levels[L]
+                L, R = L+1, R-1
+
+            return levels
+
+        def counter(root, level):
+            if len(levels) == level:
+                levels.append([])
+
+            if root.left:
+                counter(root.left, level+1)
+            if root.right:
+                counter(root.right, level+1)
+
+            levels[level].append(root.val)
+
+        counter (root, 0)
+
+        levels = bottom_up_levels(levels) 
+        return levels
+
+        
