@@ -9,16 +9,20 @@ Output: 1
 """
 
 class Solution:
-    def UniqueBST(self, n: int) -> int:
-        numTree = [1] * (n + 1)
-        for nodes in range (2, (n + 1)):
+    def numTrees(self, n: int) -> int:
+        #            left subtree         right subtree
+        #numTree[3] = numTree[0]=1      *     numTree[2]=2       +
+        #             numTree[1]=1      *     numTree[1]=1       +
+        #             numTree[2]=2      *     numTree[0]=1       = 5
+        numtree = [1] * (n+1)
+        for nodes in range(2, n+1): #starting from 2 nodes
             total = 0
-            for root in range(1, (nodes + 1)):
-                left = root - 1
-                right = nodes - root
-                total += numTree[left] * numTree[right]
-            numTree[nodes] = total
-        return numTree[n]
+            for root in range(1, nodes+1): #making every node as root node
+                left = root - 1 # number of nodes remaining in left substree taking a node as root
+                right = nodes - root # number of nodes remaining in right substree taking a node as root
+                total += numtree[left] * numtree[right]
+            numtree[nodes] = total 
+        return numtree[n]
     
 if __name__ == "__main__":
     obj = Solution()
