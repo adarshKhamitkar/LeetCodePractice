@@ -4,26 +4,24 @@ Return the maximum element in a Binary Tree (BST).
 from typing import Optional
 
 class TreeNode:
-    def __init__(self, val=0, left=None, right=None):
+    def __init__(self,val, left=None, right=None):
         self.val = val
         self.left = left
         self.right = right
-
+        
 class Solution:
-    def returnMaxElement(self, root: Optional[TreeNode]) -> int:
-        if not root:
-            return float('-inf')
-        def dfs(node,max_val):
+    def returnMaxElement(self,root:Optional[TreeNode])-> int:
+        def dfs(node, max_val):
             if node:
-                max_val = max(node.val,max_val)
+                if node.val > max_val:
+                    max_val = node.val
                 dfs(node.left,max_val)
                 dfs(node.right,max_val)
             return max_val
+        return max(dfs(root.left,root.val),dfs(root.right,root.val)) if root else -1
         
-        max_val = root.val
-            
-        return max(dfs(root.left,max_val),dfs(root.right,max_val))  # Return -inf for empty tree
 
+        
 if __name__ == "__main__":
     # Example usage
     root = TreeNode(3)
