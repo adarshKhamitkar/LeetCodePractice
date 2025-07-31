@@ -11,11 +11,19 @@ class Solution:
 
         i,j = 0, 0
         n = len(s)
-        res = []
+        count_str = 0
+
         while j <= (n+1):
             j = i + 3
             substr = s[i:j]
             if countVowels(substr) == 2:
-                res.append(substr)
+                count_str+=1
             i += 1
-        return len(res)
+        return count_str
+
+if __name__ == "__main__":
+    s = "abciiidef"
+    sol = Solution()
+    print(sol.maxVowels(s))
+
+#Time Complexity: O(N) where N is the length of the string and K is the length of the substring being checked for vowels.

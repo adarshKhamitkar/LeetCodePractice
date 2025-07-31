@@ -43,3 +43,13 @@ The rectangle formed by p1 = 2 and p2 = 3 has an area equal to |4-2| * |8-10| = 
 The rectangle formed by p1 = 1 and p2 = 2 has an area equal to |2-4| * |7-8| = 2.
 Note that the rectangle formed by p1 = 1 and p2 = 3 is invalid because the area is 0.
 """
+
+
+SELECT
+    p1.id as P1,
+    p2.id as P2,
+    ABS(p1.x_value - p2.x_value) * ABS(p1.y_value - p2.y_value) as AREA 
+FROM Points p1 JOIN Points p2
+ON p1.id < p2.id and p1.x_value != p2.x_value and p1.y_value != p2.y_value
+ORDER BY AREA DESC, p1.id ASC, p2.id ASC;
+
