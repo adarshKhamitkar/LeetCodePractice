@@ -1,5 +1,5 @@
 class Solution:
-    def maxVowels(self, s: str) -> int: 
+    def maxVowels(self, s: str) -> int: #Code signal (O(N * K))
         vowels = ("a", "e", "i", "o", "u")
         def countVowels(s) -> int:
             _count = 0
@@ -12,6 +12,7 @@ class Solution:
         i,j = 0, 0
         n = len(s)
         count_str = 0
+
         while j <= (n+1):
             j = i + 3
             substr = s[i:j]
