@@ -44,7 +44,7 @@ class Solution:
 
 
 if __name__ == "__main__":
-    arr = [38, 40, 44, 50, 60]
+    arr = [100, 38, 40, 44, 50, 60]
     sol = Solution()
     print(sol.sumDigits(arr))  # Output: 8
 
