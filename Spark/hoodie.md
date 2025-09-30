@@ -673,3 +673,223 @@ Introduced in Hudi 0.11.0+, these are stored in the Hudi metadata table (a scala
 - **Performance Tips**: Start with BLOOM/SIMPLE; scale to BUCKET/RLI for >TB tables. Monitor via Hudi's metrics.
 - **Evolution**: As of 2025, Hudi 1.x emphasizes metadata indexes for lakehouse queries; check version-specific docs for updates.
 
+
+# Detailed Notes on Hudi Merge Queries and SQL Writes
+
+Apache Hudi's Merge-on-Read (MOR) tables enable efficient handling of updates and deletes in data lakes by appending changes to lightweight delta log files, which are then merged with base columnar files (e.g., Parquet) during queries or via periodic compaction. This contrasts with Copy-on-Write (COW) tables, which synchronously rewrite files for each update. MOR queries, particularly snapshot queries, dynamically merge base and log files at read time to provide a consistent view of the data. As of September 30, 2025, Hudi's MOR implementation (in version 1.x) emphasizes low-latency writes, scalable incremental processing, and optimizations like partial updates and non-blocking concurrency, making it ideal for streaming, CDC, and hybrid workloads.
+
+This document also covers Hudi's SQL-based write merges via `MERGE INTO` statements, which provide declarative support for complex upsert/delete operations directly in SQL, bridging the gap between DataFrame APIs and SQL workflows.
+
+## SQL-Based Write Merges (MERGE INTO)
+
+### Introduction/Purpose
+The `MERGE INTO` statement enables complex updates and merges against source data, allowing conditional actions (e.g., update, insert, or delete) based on matching records. It extends the simpler `UPDATE` statement by handling both matched and unmatched records in a single operation, ideal for ETL pipelines, CDC ingestion, or bulk data synchronization. This feature promotes declarative data management, reducing the need for custom DataFrame logic.
+
+### Supported Engines
+- **Spark SQL**: Full support, including examples for both COW and MOR tables.
+- **Flink SQL**: Not explicitly supported for `MERGE INTO` as of September 2025; Flink supports related DML like `INSERT INTO`, `UPDATE`, and `DELETE` in batch mode.
+
+### Syntax
+**Full Syntax:**
+```
+MERGE INTO tableIdentifier AS target_alias
+USING (sub_query | tableIdentifier) AS source_alias
+ON <merge_condition>
+[ WHEN MATCHED [ AND <condition> ] THEN <matched_action> ]
+[ WHEN NOT MATCHED [ AND <condition> ] THEN <not_matched_action> ]
+```
+- `<merge_condition>`: Boolean equality condition (e.g., `target.id = source.id`).
+- `<matched_action>`: `DELETE` | `UPDATE SET *` | `UPDATE SET column1 = expression1 [, ...]`.
+- `<not_matched_action>`: `INSERT *` | `INSERT (column1 [, ...]) VALUES (value1 [, ...])`.
+
+### Supported Clauses and Operations
+- **WHEN MATCHED [AND <condition>]**: For records where the join condition holds; supports:
+  - **UPDATE**: Full (`SET *`) or partial column updates; optional filter (e.g., `flag != 'delete'`).
+  - **DELETE**: Removes matched records.
+- **WHEN NOT MATCHED [AND <condition>]**: For unmatched records; supports:
+  - **INSERT**: Full (`*`) or selective columns (unspecified columns default to `NULL`).
+
+Operations integrate with Hudi's record merging (e.g., via payload classes like `OverwriteWithLatestAvroPayload` for latest-write-wins) and indexing (e.g., Bloom or Bucket for efficient lookups during matching).
+
+### Configurations
+| Config | Description | Default | Notes |
+|--------|-------------|---------|-------|
+| `hoodie.record.merge.mode` | Merge strategy (e.g., `EVENT_TIME_ORDERING`); requires `preCombineField` for time-based merges in UPDATE/INSERT. | N/A | Essential for event-time scenarios. |
+| Table primary keys | Join condition and UPDATE/INSERT must include user-defined keys; auto-generated keys allow flexible joins. | N/A | Enforced for consistency. |
+| Data types | Source must match target's primary/partition/preCombineField types. | N/A | Prevents schema mismatches. |
+
+Integrates with DataSource API (via Spark's `MERGE` command) and DeltaStreamer (for source ingestion). Payload classes (e.g., custom `HoodieRecordPayload`) can override merge logic; indexing is auto-applied based on table config.
+
+### Examples
+- **Spark SQL (Non-Partitioned Table)**:
+  ```
+  MERGE INTO hudi_mor_tbl AS target
+  USING merge_source AS source
+  ON target.id = source.id
+  WHEN MATCHED THEN UPDATE SET *
+  WHEN NOT MATCHED THEN INSERT *;
+  ```
+- **Spark SQL (Partitioned Table with Conditions)**:
+  ```
+  MERGE INTO hudi_cow_pt_tbl AS target
+  USING (SELECT id, name, '1000' AS ts, flag, dt, hh FROM merge_source2) source
+  ON target.id = source.id
+  WHEN MATCHED AND flag != 'delete' THEN UPDATE SET id = source.id, name = source.name, ts = source.ts, dt = source.dt, hh = source.hh
+  WHEN MATCHED AND flag = 'delete' THEN DELETE
+  WHEN NOT MATCHED THEN INSERT (id, name, ts, dt, hh) VALUES (source.id, source.name, source.ts, source.dt, source.hh);
+  ```
+
+### Limitations
+- No schema evolution; use `ALTER TABLE` DDL or DataSource writes for changes.
+- Partial updates (column-specific) unsupported for: bootstrapped tables, virtual keys, or schema-on-read.
+- Requires exact data type matches for keys/fields.
+- Limited to equality joins; complex predicates need subqueries.
+
+### Performance Notes
+- Leverages Hudi's indexes for fast matching, reducing shuffle; performs well for upsert-heavy workloads.
+- For large sources, combine with partitioning for locality.
+- Overhead similar to DataFrame upserts but with SQL simplicity.
+
+### Integration Notes
+- **DeltaStreamer**: Use `--operation MERGE` with SQL sources for pipeline automation.
+- **DataSource API**: Executes via Spark's native `MERGE` for seamless DataFrame-to-SQL transition.
+
+## Query Types in MOR Tables
+
+Hudi supports multiple query semantics tailored to MOR's dual-file structure (base + deltas), allowing flexibility between freshness and performance.
+
+### Snapshot Queries
+- **Description**: Provide the latest consistent snapshot of the table by merging base files with all pending delta log files for the most recent commits. This ensures near-real-time data visibility (e.g., within minutes) but incurs merge overhead.
+- **Use Cases**: Real-time analytics, dashboards, or any workload needing the freshest data.
+- **Example (Spark SQL)**:
+  ```
+  val hudiSnapshotQueryDF = spark
+    .read
+    .format("hudi")
+    .option("hoodie.datasource.query.type", "snapshot")
+    .load(tablePath)
+  hudiSnapshotQueryDF.createOrReplaceTempView("hudi_table")
+  spark.sql("SELECT * FROM hudi_table WHERE fare > 20.0").show()
+  ```
+- **Merging Behavior**: Uses full-schema readers for complete row reconstruction (applying updates/deletes) or required-schema readers for column projection to minimize I/O.
+
+### Read-Optimized Queries
+- **Description**: Skip delta logs entirely, reading only compacted base files for superior performance on latency-sensitive, read-heavy workloads. Data may be slightly stale (e.g., a few commits behind, depending on compaction frequency), representing a valid historical snapshot.
+- **Use Cases**: Batch analytics, ML training, or data warehousing where minute-level staleness is acceptable.
+- **Example (Spark)**: Set `hoodie.datasource.query.type=read_optimized` in the read options above. Post-compaction, queries scan only Parquet base files, achieving 2-5x faster performance than snapshot queries on large tables.
+- **Merging Behavior**: No on-the-fly merging; relies on pre-compacted bases. Ideal for columnar formats like Parquet/ORC.
+
+### Incremental Queries
+- **Description**: Pull only changed records (inserts, updates, deletes) since a specified commit time, enabling efficient change streams. Supports two modes: "latest_state" (latest value per key) or "cdc" (full before/after images with operation types).
+- **Use Cases**: Downstream ETL, replication, or CDC pipelines.
+- **Example (Spark)**:
+  ```
+  val hudiIncQueryDF = spark.read
+    .format("hudi")
+    .option("hoodie.datasource.query.type", "incremental")
+    .option("hoodie.datasource.read.begin.instanttime", "20230101000000")
+    .option("hoodie.datasource.query.incremental.format", "cdc")  // For CDC mode
+    .load(tablePath)
+  ```
+- **Hive Support**: Uses `HiveIncrementalPuller` for SQL-based extraction, saving changes to temp tables for upserting. Set `fromCommitTime` and `maxCommits` (e.g., -1 for all commits).
+- **Merging Behavior**: Filters changes via timeline metadata, applying merges only to affected records.
+
+### Streaming/CDC Queries
+- **Description**: Extend incremental queries for continuous processing, outputting change events in real-time. Supports event-time ordering for late-arriving data.
+- **Use Cases**: Streaming pipelines (e.g., Kafka to Hudi replication).
+- **Example (Spark Streaming)**: Enable with `read.streaming.enabled=true` for MOR tables, pulling deltas as micro-batches.
+- **Merging Behavior**: Leverages log files for low-latency appends, with optional log compaction to reduce file count.
+
+## How Merging Works in MOR Queries
+
+MOR merging reconciles base files (immutable columnar storage) with delta logs (row-oriented appends for changes):
+1. **Write Phase**: Inserts create new base files or expand small ones; updates/deletes append to logs (e.g., Avro or Parquet deltas) using key-based routing to the same file group for locality.
+2. **Query Phase**: 
+   - Index lookups (e.g., Bloom or Bucket) identify affected file groups.
+   - Readers fetch base + logs; merges apply changes via `RecordMerger` (e.g., latest-write-wins based on timestamps).
+   - Optimizations: Skip merging for unchanged file groups; push down filters to logs; partial reads for projected columns.
+3. **Compaction Phase**: Async background process merges logs into new bases, triggered by thresholds (e.g., 5 delta commits). Uses strategies like LogFileSizeBasedCompactionStrategy.
+- **Concurrency**: Non-blocking via MVCC and OCC, allowing concurrent writes during queries/compaction.
+- **Delete Handling**: Soft deletes mark records; hard deletes log keys or positions, applied during merge.
+
+## Configurations for MOR Queries
+
+Key configs control query type, merging, and optimizations. Grouped by category:
+
+### Query Type and Incremental
+| Config | Description | Default | Engine |
+|--------|-------------|---------|--------|
+| `hoodie.datasource.query.type` | Query mode: `snapshot`, `read_optimized`, `incremental` | `snapshot` | Spark/Flink |
+| `hoodie.datasource.read.begin.instanttime` | Start time for incremental pulls | N/A | Spark |
+| `hoodie.datasource.query.incremental.format` | `latest_state` or `cdc` for incremental | `latest_state` | Spark (0.13.0+) |
+| `hoodie.datasource.read.incr.mode` | Incremental mode (e.g., `latest_state`, `cdc`) | N/A | Spark |
+| `read.start-commit` / `read.end-commit` | Commit bounds for Flink incremental | N/A | Flink |
+
+### Merging and Read Optimizations
+| Config | Description | Default | Engine |
+|--------|-------------|---------|--------|
+| `hoodie.merge.type` | Merger strategy (e.g., `OverwriteWithLatestAvroPayload`) | N/A | All |
+| `hoodie.datasource.read.enable.micropulls` | Enable micro-pulls for small incremental queries | false | Spark |
+| `hoodie.read.optimize.min.file.size` | Min base file size for read-optimized | 0 | Spark |
+| `as.of.instant` | Time-travel to specific instant | N/A | Spark (time travel) |
+
+### Compaction (Affects Query Staleness)
+| Config | Description | Default | Engine |
+|--------|-------------|---------|--------|
+| `hoodie.compact.schedule.enable` | Enable scheduled compaction | true (MOR) | All |
+| `hoodie.compact.inline.max.delta.commits` | Max deltas before inline compaction | 5 | All |
+| `hoodie.compact.trigger.strategy` | Trigger: `NUM_COMMITS`, `TIME_ELAPSED` | `NUM_COMMITS` | All |
+| `hoodie.compaction.log.file.size.threshold` | Compact if log size exceeds (bytes) | 0 | All |
+| `enable.log.compaction` | Enable log file compaction | false | 0.14.0+ |
+
+For Hive: Set `hive.input.format=org.apache.hudi.hadoop.hive.HoodieCombineHiveInputFormat` to handle merges correctly.
+
+## Optimizations for MOR Queries
+
+- **Index Integration**: Use Bucket or Bloom indexes to prune file groups, reducing merge I/O by 10-100x.
+- **Partial Updates**: Log only changed columns, scaling writes linearly with schema width.
+- **Filter Pushdown**: Apply predicates to delta logs before merging, minimizing scanned data.
+- **Async Compaction**: Non-blocking; schedule via `hoodie.compact.schedule.enable=true` for predictable read-optimized latency.
+- **Locality Preservation**: Route changes to original file groups for better pruning in time-partitioned tables.
+- **Performance Benchmarks (2025)**: Hudi MOR snapshot queries achieve 2-5x faster reads than Iceberg equivalents on update-heavy workloads; incremental pulls are 10x more efficient than full scans.
+
+Compared to Iceberg/Delta: Hudi excels in streaming (event-time merging, async compaction) and avoids retry-heavy OCC, but may have higher metadata overhead for very wide tables.
+
+## Engine Support
+
+- **Spark**: Full support for all query types via DataSource API; add `hudi-spark-bundle` JAR.
+- **Hive**: Snapshot/incremental via `HiveIncrementalPuller`; use CombineHiveInputFormat for MOR merges.
+- **Flink**: Snapshot/incremental with commit-based configs; streaming via Table API.
+- **Trino/Presto**: Snapshot queries; Trino MOR support in progress (as of mid-2025).
+- **Best Practice**: Sync tables to metastore for engine interoperability.
+
+## Pros and Cons of MOR Queries
+
+### Pros
+- Low write latency (append-only deltas) for high-velocity updates.
+- Flexible reads: Balance freshness (snapshot) vs. speed (read-optimized).
+- Scalable CDC/incremental for pipelines.
+- Cost-effective: Amortizes merges via async compaction.
+
+### Cons
+- Snapshot query latency higher due to on-the-fly merging (mitigate with frequent compaction).
+- Staleness in read-optimized mode if compaction lags.
+- Increased storage from uncompacted logs (manage via thresholds).
+
+## Examples and Best Practices
+
+- **CDC Pipeline**: Use incremental CDC mode to stream changes from RDBMS to Hudi, merging with `OverwriteWithLatestAvroPayload`.
+- **Time-Travel Analytics**: Query past snapshots with `as.of.instant=20250101000000` for audits.
+- **MERGE INTO Best Practice**: Use for conditional logic in SQL pipelines; test with small datasets to tune indexes.
+- **Best Practices**: 
+  - Compact every 3-5 commits for <1% staleness.
+  - Use day-based partitioning for locality.
+  - Monitor via Hudi metrics (e.g., `COMMIT_MERGE_TIME`).
+  - For Hive: Always set input format to avoid duplicate reads.
+
+## Recent Updates (as of 2025)
+- Hudi 1.0: Introduces Non-Blocking Concurrency Control (NBCC) for zero-retry writes during compaction.
+- Log Compaction (0.14.0+): Reduces delta file count by 50-80% without full merges.
+- Enhanced Mergers: Support for custom `RecordMerger` in event-time scenarios, improving late-data handling over Iceberg.
+- SQL MERGE INTO Enhancements: Improved partial update support and better integration with auto-generated keys (1.0+).
+  
