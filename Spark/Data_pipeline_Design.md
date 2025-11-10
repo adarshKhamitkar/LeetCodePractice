@@ -353,3 +353,192 @@ PrestoDB supports similar federation, though it's less actively developed than T
 **Setup**: Analogous to Trino—define separate catalogs in `etc/catalog/`. Cross-queries work via the same SQL syntax. However, Trino is preferred for new setups due to better Hudi integration and performance.
 
 In summary, both engines enable this in a single cluster without silos, making them ideal for lakehouse + operational DB hybrids. For full details, check Trino's connector docs. If you need config snippets for a specific version, let me know!
+
+
+
+System Design Analysis: Netflix Playback Events Pipeline (Lambda Architecture)
+
+
+  Here is a detailed breakdown of the components in your proposed Lambda architecture.
+
+  1. Ingestion & Buffering: Apache Kafka
+
+
+   * Role in Your Design: To act as the central, highly durable, and scalable "front door" for all incoming playback events. It decouples the event producers (the Flink
+     extractor) from the consumers (both the real-time Flink job and the batch Spark job), serving as a short-term buffer (24 hours to 7 days).
+
+
+   * What is Apache Kafka?
+      It's a distributed streaming platform built around a replicated, partitioned, and ordered log. It allows producers to publish streams of records to "topics," and
+  consumers to subscribe to these topics. Its key features are high throughput, fault tolerance through replication, and the ability for consumers to replay messages.
+
+
+   * Justification for Choosing Kafka (Why Kafka?):
+       * Extreme Throughput: Kafka is engineered for high-velocity data streams and can easily handle your target of 200K events/sec with proper partitioning.
+       * Durability and Fault Tolerance: Data is replicated across multiple brokers (servers), ensuring that no events are lost even if a server fails.
+       * Replayability: This is critical for a Lambda architecture. The batch layer can re-read the same data from the log that the speed layer processed, ensuring
+         consistency. If a batch job fails, it can restart from the last known offset.
+       * Decoupling: It allows the speed and batch layers to operate independently. If the batch layer goes down for maintenance, the speed layer is unaffected, and Kafka
+         buffers the data for the batch job to process when it comes back online.
+
+   * Comparison with Alternatives:
+
+
+  | Alternative | Why It's a Good Tool | Why Kafka is Better for This Design |
+  | :--- | :--- | :--- |
+  | RabbitMQ | Excellent for complex message routing (e.g., topic, fanout, direct exchanges). Provides strong per-message guarantees and is great for traditional
+  enterprise messaging and microservices communication. | Lower Throughput: Not designed for the firehose-level throughput of 200K+ events/sec that Kafka handles natively.
+   <br> Not a Replayable Log: RabbitMQ is a traditional message broker; once a message is consumed and acknowledged, it's gone. It doesn't have Kafka's persistent log
+  concept, which is essential for the batch layer to replay data. |
+  | AWS SQS / Google Pub/Sub | Fully managed, highly scalable, and simple to use. Excellent for decoupling applications without managing infrastructure. Perfect for many
+  cloud-native workloads. | Replayability is Limited: While they have some replay/seek features, they are not designed as a persistent log in the same way as Kafka. <br>
+  Throughput & Cost at Scale: At 200K messages/sec, the cost of a managed service can become significantly higher than a self-hosted Kafka cluster. Kafka also offers more
+  fine-grained control over performance tuning. <br> Ecosystem: Kafka has a richer ecosystem of connectors (Kafka Connect) and processing libraries (Kafka Streams)
+  tailored for data engineering pipelines. |
+
+  ---
+
+  2. Speed Layer Processing: Apache Flink
+
+
+   * Role in Your Design: To provide continuous, low-latency processing of events from Kafka. It reads the data, performs any necessary real-time transformations or
+     aggregations, and writes the results to the speed layer's database (Cassandra/CockroachDB).
+
+
+   * What is Apache Flink?
+      A true stream processing framework designed for stateful computations over unbounded data streams. Its key features are low latency (event-at-a-time processing),
+  sophisticated state management, and strong support for event-time semantics, which is crucial for handling out-of-order data.
+
+
+   * Justification for Choosing Flink (Why Flink?):
+       * True Streaming Engine: Flink processes events one by one, enabling sub-second latencies, which is ideal for the "speed layer" where real-time insights are needed.
+       * Advanced State Management: Flink provides robust, checkpointed state. This is essential for complex operations like windowing (e.g., "how many users started
+         playback in the last 5 minutes?") or tracking user session state.
+       * Exactly-Once Guarantees: Flink's combination of stateful processing and two-phase commit sinks allows it to provide end-to-end exactly-once semantics, preventing
+         data loss or duplication even during failures.
+
+   * Comparison with Alternatives:
+
+
+  | Alternative | Why It's a Good Tool | Why Flink is Better for This Design |
+  | :--- | :--- | :--- |
+  | Apache Spark (Structured Streaming) | A powerful and popular engine for stream processing. It has a unified API for both batch and streaming, making it easy to write
+  code. It offers high throughput and fault tolerance. | Micro-Batch Architecture: Spark Streaming operates on micro-batches (e.g., processing all data that arrived in the
+   last 1 second). While very fast, this inherently leads to higher latency than Flink's true event-at-a-time model. For the lowest possible latency in a speed layer,
+  Flink is the superior choice. <br> State & Event Time: Flink's handling of event time and stateful operations is often considered more flexible and powerful than
+  Spark's. |
+  | Kafka Streams | A lightweight Java library, not a full framework. It's excellent for building streaming microservices where the processing logic is relatively simple
+  and can be embedded directly within your application. | Not a Full Framework: Kafka Streams lacks a dedicated cluster manager and operational tools like Flink's
+  dashboard. Flink is a full-fledged distributed system designed for large-scale, mission-critical streaming applications, offering better resource management, monitoring,
+   and operational control. |
+
+  ---
+
+  3. Speed Layer Storage: Apache Cassandra
+
+   * Role in Your Design: To store the "hot" data from the speed layer for 90 days. It must handle a very high write load (200K events/sec) while serving queries for
+     real-time analytics dashboards.
+
+
+   * What is Apache Cassandra?
+      A distributed NoSQL, wide-column database designed for extreme write throughput, linear scalability, and high availability. It has a masterless architecture, meaning
+   there is no single point of failure.
+
+
+   * Justification for Choosing Cassandra (Why Cassandra?):
+       * Optimized for Writes: Cassandra's architecture (using a Log-Structured Merge-tree) is built to absorb massive write volumes, making it a perfect fit for the 200K
+         events/sec requirement.
+       * Linear Scalability: You can increase write/read capacity simply by adding more nodes to the cluster.
+       * High Availability: Data is replicated across multiple nodes and data centers, ensuring the database is always available even if some nodes fail.
+       * Time-Series Data: It excels at handling time-series data (like events), where data is typically partitioned by time and queried by key.
+
+
+   * Comparison with Alternatives:
+
+
+  | Alternative | Why It's a Good Tool | Why Cassandra is Better for This Design |
+  | :--- | :--- | :--- |
+  | CockroachDB / Google Spanner | Distributed SQL databases that offer strong consistency (ACID) and the familiarity of SQL. Excellent for applications that require
+  transactional integrity across a distributed system. | Write Throughput & Cost: While highly scalable, distributed SQL databases generally have higher write latency and
+  lower throughput per node compared to Cassandra because they are doing more work to guarantee consistency. At 200K writes/sec, a Cassandra cluster would likely be more
+  performant and cost-effective. The strong consistency is overkill for this use case. |
+  | Apache Pinot / Apache Druid | Real-time OLAP (analytical) databases. They are specifically designed to provide sub-second query latency on massive, streaming datasets.
+   They are the gold standard for user-facing analytics. | Not a General-Purpose DB: Pinot and Druid are optimized for analytical queries (aggregations, filtering,
+  grouping) but are not ideal for point lookups or general-purpose storage. Cassandra is more flexible if you also need to retrieve individual event records quickly by a
+  primary key. The choice depends on the query patterns: if it's 100% analytics, Pinot/Druid are strong contenders; if you need flexible reads, Cassandra is better. |
+  | MongoDB | A popular document-oriented NoSQL database. It's very flexible due to its schema-less nature and is easy for developers to use. | Write Scalability: While
+  MongoDB can be scaled, achieving the same level of write throughput as Cassandra at 200K events/sec typically requires more complex sharding, more operational overhead,
+  and potentially more hardware. Cassandra's architecture is more naturally suited to this specific write-heavy workload. |
+
+  ---
+
+
+  4. Batch Layer Processing: Apache Spark
+
+   * Role in Your Design: To run periodically (every 6 hours), read a large batch of data from Kafka, perform complex transformations, and write the results to the long-term
+      data lakehouse (Hudi).
+
+
+   * What is Apache Spark?
+      A unified analytics engine for large-scale data processing. It is the de-facto industry standard for batch ETL (Extract, Transform, Load) jobs due to its speed, ease
+   of use (with DataFrame APIs), and rich ecosystem.
+
+
+   * Justification for Choosing Spark (Why Spark?):
+       * Batch Processing Prowess: Spark is unmatched for large-scale batch transformations. Its Catalyst optimizer and Tungsten execution engine make it incredibly
+         efficient.
+       * Resilience: It is designed to handle failures during long-running jobs on large datasets.
+       * Unified Engine: While we are using it for batch, its ability to also handle streaming, machine learning (MLlib), and graph processing (GraphX) makes it a versatile
+         tool to have in the stack.
+       * Ecosystem: It has native, highly optimized integrations with all the components in this design (Kafka, S3, Hudi, Hive).
+
+
+   * Comparison with Alternatives:
+
+
+  | Alternative | Why It's a Good Tool | Why Spark is Better for This Design |
+  | :--- | :--- | :--- |
+  | Apache Flink (in Batch Mode) | Flink has a batch processing mode and can perform ETL. Using Flink for both speed and batch would unify the codebase. | Maturity and 
+  Optimization for Batch: Spark's batch processing engine is generally considered more mature, feature-rich, and optimized for large-scale ETL than Flink's. For a heavy,
+  periodic batch job like this, Spark is the safer, more standard, and likely more performant choice. |
+  | Cloud-Native ETL (e.g., AWS Glue) | These are serverless, managed services that run Spark jobs. They eliminate the need to manage a Spark cluster, reducing operational
+   overhead. | This is not an "or" but a "how". AWS Glue is a managed Spark service. The choice is between self-managing a Spark cluster (more control, potentially
+  cheaper) vs. using a managed service like Glue or Dataproc (less overhead, easier to use). For an interview, stating you'd use a managed Spark service is a great answer.
+   |
+
+  ---
+
+
+  5. Batch Layer Storage: Apache Hudi
+
+
+   * Role in Your Design: To provide a long-term, queryable, and mutable "source of truth" on top of cheap cloud storage (S3/GCS). It stores all historical data (4-5 years)
+     and allows for updates and deletes, which is difficult with plain data files.
+
+   * What is Apache Hudi?
+      A transactional data lake format that brings database-like features (ACID transactions, upserts, deletes) to a data lake. It organizes data in tables on top of file
+  storage like S3 and integrates with query engines like Spark, Presto, and Hive.
+
+
+   * Justification for Choosing Hudi (Why Hudi?):
+       * Enables Mutations on the Data Lake: Standard data lakes with Parquet/ORC files are immutable. Hudi allows you to efficiently handle updates (e.g., correcting a past
+          event) or deletes (e.g., for GDPR compliance) without rewriting entire partitions.
+       * ACID Transactions: Ensures that jobs writing to the data lake either complete fully or not at all, preventing data corruption.
+       * Query Performance: Offers different table types (Copy-on-Write for read-optimized, Merge-on-Read for write-optimized) to balance ingestion speed and query
+         performance.
+
+   * Comparison with Alternatives:
+
+
+  | Alternative | Why It's a Good Tool | Why Hudi is a Good Choice for This Design |
+  | :--- | :--- | :--- |
+  | Apache Iceberg | Another leading transactional data lake format. Its key strengths are excellent schema evolution support, hidden partitioning (which simplifies
+  queries), and powerful time-travel capabilities. It is gaining massive industry adoption. | This is a very close call. Both Hudi and Iceberg are excellent choices. Hudi
+  has historically been more focused on streaming upserts and has strong integration with Spark. Iceberg is often praised for its robust metadata layer and schema
+  evolution. In an interview, you could say: "I chose Hudi due to its mature support for Merge-on-Read for faster ingestion, but Iceberg would be an equally strong
+  candidate, and I would evaluate it in a POC, especially if complex schema changes are expected." |
+  | Delta Lake | The third major transactional data lake format, originally developed by Databricks. It is very simple to use and has extremely tight integration with the
+  Databricks/Spark ecosystem. | Ecosystem Lock-in (Perception): While open source, Delta Lake's most advanced features are often best experienced within the Databricks
+  ecosystem. Hudi and Iceberg are generally considered more "vendor-neutral." For a non-Databricks environment, Hudi or Iceberg are often preferred. The choice is a matter
+   of trade-offs, and all three are valid. |
+
