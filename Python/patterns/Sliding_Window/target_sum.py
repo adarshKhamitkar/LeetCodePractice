@@ -25,3 +25,6 @@ def find_intervals(n:int, nums:list[int], target_sum:int):
 
 
 print(find_intervals(2, [1,2,3,4,5], 5))
+
+#Time Complexity: O(N)
+#Space Complexity: O(N)
