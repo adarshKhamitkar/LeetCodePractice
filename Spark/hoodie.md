@@ -892,4 +892,141 @@ Compared to Iceberg/Delta: Hudi excels in streaming (event-time merging, async c
 - Log Compaction (0.14.0+): Reduces delta file count by 50-80% without full merges.
 - Enhanced Mergers: Support for custom `RecordMerger` in event-time scenarios, improving late-data handling over Iceberg.
 - SQL MERGE INTO Enhancements: Improved partial update support and better integration with auto-generated keys (1.0+).
-  
+
+> Give me in-detail working for running a near real time pipeline using Spark Structured Streaming and Hudi-hive tables as sink. Explain, why this solution does not work if 
+  the SLA is 2 mins. Make sure to include in-depth details about manifest file and small parquest files creation in HUDI for MOR tables.
+
+✦ Of course. This is an excellent question that gets to the heart of the trade-offs in modern data lakehouse architectures. Running a near-real-time (NRT) pipeline with
+  Spark Structured Streaming and Hudi is a powerful pattern, but it has fundamental limitations that make a 2-minute SLA unfeasible.
+
+  Let's break down the detailed working of this pipeline and then pinpoint exactly why it fails at such a low latency requirement.
+
+  The Architecture: Spark Structured Streaming + Hudi (MOR)
+
+
+  For this use case, we must use Hudi's Merge-on-Read (MOR) table type. This is because MOR is optimized for fast write/ingest latency, which is a prerequisite for any NRT
+   pipeline. Copy-on-Write (COW) is not suitable as it rewrites entire files on update, making it too slow for frequent writes.
+
+  High-Level View:
+
+
+   1. Data Source: A streaming source like Apache Kafka, where new events arrive continuously.
+   2. Processing Engine: Apache Spark, using the Structured Streaming framework to process data in micro-batches.
+   3. Sink/Storage: An Apache Hudi table stored on a distributed file system (like HDFS or S3) with its metadata managed by the Hive Metastore.
+
+  ---
+
+  In-Detail Working of the NRT Pipeline
+
+  Here is the step-by-step journey of data from Kafka to a queryable Hudi-Hive table.
+
+
+  Step 1: Data Ingestion by Spark Structured Streaming
+  Spark initiates a long-running job. In a continuous loop, the Spark driver polls the Kafka topic for new data that has arrived since the last micro-batch. It pulls a
+  collection of records and materializes them as a small, in-memory DataFrame. Let's say this trigger runs every 30-60 seconds.
+
+
+  Step 2: The Hudi Write Operation (The Core of the Process)
+  When you execute dataframe.write.format("hudi")...save(...), a complex series of events is triggered for each micro-batch:
+
+
+   1. Begin Commit: Hudi starts a new commit and marks it as "inflight" in its timeline (a log of all actions stored in the .hudi directory at the root of the table).
+
+
+   2. Record Indexing: Hudi must determine if each incoming record is a new insert or an update to an existing record. It uses an index (e.g., Bloom Index, Simple Index) to
+      look up the incoming record keys. This process "tags" each record with its target location (a specific fileId) if it's an update, or marks it as a new insert.
+
+
+   3. Writing Data to Log Files (The Key to MOR's Speed):
+       * A Hudi table is organized into File Groups. Each file group consists of one base file (.parquet) and a series of delta log files (.log.*).
+       * For Updates: Instead of rewriting the large base Parquet file, Hudi simply appends the updated records to the latest delta log file for that file group. This is an
+         append-only operation, which is extremely fast.
+       * For Inserts: Hudi appends the new records to log files, either by adding them to an existing file group with log files or creating a new file group altogether.
+
+
+   4. Finalize Commit: Once the data for the micro-batch is written to these small log files, Hudi finalizes the commit. This involves two critical actions:
+       * Updating the Hudi Timeline: It writes a metadata file to the .hudi timeline, marking the commit as complete. This file contains statistics like the number of
+         records written, which files were updated, etc.
+       * Syncing with Hive Metastore: Hudi updates the Hive Metastore, informing it about the new state of the table. This action makes the newly committed data discoverable
+          by query engines like Presto, Trino, or Hive.
+
+  This entire write cycle is very fast precisely because it avoids rewriting large Parquet files, making it suitable for NRT ingestion.
+
+  ---
+
+  Why This Solution Fails a 2-Minute SLA
+
+
+  The speed of the write path comes at a great cost to the read path and the overall stability of the system at low latencies. Here are the in-depth reasons for the
+  failure.
+
+  Bottleneck 1: The Read-Side Problem (On-the-Fly Merging)
+
+  When you query a Hudi MOR table, you have two views:
+
+
+   * Read-Optimized (`_ro`) View: Queries only the base .parquet files. It's fast but stale, as it doesn't include the latest data from the log files.
+   * Snapshot (`_rt`) View: This gives you the real-time view of the data. To serve a query, the engine must read the base Parquet file and then read all associated log 
+     files, merging them on-the-fly in memory to produce the final, up-to-date record.
+
+
+  With a 2-minute SLA, you are forced to use the Snapshot View. Imagine your streaming job commits data every 60 seconds. After just a few minutes, a single file group
+  might have one base file and several log files. A query must perform this expensive merge for every file group it touches. This on-the-fly merge is computationally
+  intensive and is the primary source of read latency. As more commits happen, reads get progressively slower until a compaction runs. This read operation alone can easily
+   take longer than 2 minutes.
+
+  Bottleneck 2: The Write-Side Problem (Metadata Hell)
+
+
+  To keep the system "fresh" enough for a 2-minute SLA, you must write very frequently (e.g., every 30-60 seconds). This creates a cascade of problems on the write side.
+
+
+   * Small File Proliferation: Each micro-batch commit creates new, tiny .log files across many file groups. This is the classic "small file problem." A distributed
+     filesystem like HDFS or S3 is inefficient at handling millions of tiny files, slowing down all file listing and access operations.
+
+
+   * Manifest File Bloat (The Critical Issue):
+       * What is the Manifest File? Hudi maintains internal metadata to track the state of the table. A key part of this is a manifest file that contains a list of all base
+         and log files that make up the latest version of the table.
+       * How it Bloats: With every commit, Hudi adds new log files to the table. The list of files in the manifest grows linearly with each commit. When you are committing
+         every 60 seconds, this file becomes enormous very quickly.
+       * The Impact: This bloated manifest file cripples performance for both reads and writes:
+           * Write Latency: Before starting a new micro-batch write, Spark executors must read this manifest to get the latest view of the table structure. Loading and
+             parsing a massive manifest file adds significant overhead and latency before a single record is even written.
+           * Read Latency: The query planner (in Presto/Trino) also needs to read this file list to plan the query. A large manifest slows down query planning time, adding
+             to the overall latency before the expensive on-the-fly merge even begins.
+
+  Bottleneck 3: The Compaction Dilemma
+
+  To solve the problems above, Hudi has a process called Compaction, which reads the base file and its log files and rewrites them as a new, compacted base file. This is
+  essential for maintaining read performance.
+
+
+  However, for a 2-minute SLA, compaction becomes a dilemma:
+
+
+   * If you don't compact frequently: The number of log files grows, making snapshot queries unacceptably slow (violating the SLA).
+   * If you compact frequently (e.g., every 5-10 minutes): Compaction is a heavy, resource-intensive batch job. It reads a lot of data and writes a lot of data, putting
+     significant I/O and CPU load on the cluster. This heavy process can interfere with the regular, lightweight streaming writes, causing them to slow down, miss their
+     triggers, and ultimately fail to meet the ingest-side of the SLA.
+
+  You are caught in a vicious cycle: you need compaction to enable fast reads, but the compaction process itself is too slow and disruptive for a system that needs to be
+  stable and predictable on a 2-minute interval.
+
+  Conclusion
+
+
+  A Spark + Hudi MOR pipeline is an excellent NRT solution for SLAs in the 5-30 minute range. This window provides enough time for micro-batches to land, for compaction to
+   run periodically without causing major disruption, and for snapshot queries to perform reasonably.
+
+
+  However, a 2-minute SLA pushes the architecture beyond its limits. The combination of:
+   1. Expensive on-the-fly merges for real-time reads.
+   2. Crippling metadata overhead (manifest bloat) from frequent commits.
+   3. The disruptive, resource-intensive nature of compaction.
+
+
+  ...makes it practically impossible to guarantee that data can be written, made queryable, and read by a user all within a 120-second window.
+
+
+
